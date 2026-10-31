@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Student Panel - Classroom Poll</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#f5f6fb;--card:#fff;--tx:#1b2232;--mut:#667085;--bd:#e2e5ee;--pri:#4f46e5;--ok:#16a34a;--bad:#ef4444;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1219;--card:#181c27;--tx:#e8ebf3;--mut:#98a2b3;--bd:#2a3042;--pri:#818cf8;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0f1219;--card:#181c27;--tx:#e8ebf3;--mut:#98a2b3;--bd:#2a3042;--pri:#818cf8;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:640px;margin:0 auto;padding:16px}
+h1{font-size:1.4rem;margin:.2rem 0}h2{font-size:1.1rem;margin:0 0 .6rem}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:16px;margin:12px 0}
+.top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.mut{color:var(--mut);font-size:.9rem}
+input[type=text],input[type=email],input[type=tel],input[type=password]{width:100%;padding:10px 12px;margin:5px 0 10px;border:1px solid var(--bd);border-radius:10px;background:var(--bg);color:var(--tx);font:inherit}
+label.l{font-size:.85rem;color:var(--mut)}
+button{background:var(--pri);color:#fff;border:0;border-radius:10px;padding:10px 16px;font:inherit;font-weight:600;cursor:pointer}
+button.g{background:transparent;color:var(--pri);border:1px solid var(--bd)}
+.tabs{display:flex;gap:8px;margin-bottom:10px}.tabs button{flex:1}
+.opt{display:flex;gap:10px;align-items:center;padding:10px 12px;border:1px solid var(--bd);border-radius:10px;margin:6px 0;cursor:pointer}
+.opt:has(input:checked){border-color:var(--pri)}
+.msg{color:var(--bad);font-size:.9rem;min-height:1.2em}.ok{color:var(--ok)}
+.ov{position:fixed;inset:0;background:rgba(0,0,0,.5);display:grid;place-items:center;padding:16px;z-index:10}
+.pop{background:var(--card);border:1px solid var(--bd);border-radius:18px;padding:28px 24px;max-width:360px;width:100%;text-align:center;animation:pp .25s ease}
+.pop .em{font-size:3rem}.pop h2{font-size:1.3rem;margin:.4rem 0}
+@keyframes pp{from{transform:scale(.85);opacity:0}to{transform:scale(1);opacity:1}}
+.busy{position:fixed;top:0;left:0;right:0;background:#f59e0b;color:#000;text-align:center;padding:8px;font-size:.9rem;z-index:20;display:none}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script>
+/* ======= CONFIG: deploy ke baad apne server ka address yahan daalo (end me "/" mat lagao) ======= */
+const API_URL = "http://localhost:3000";
+/* ============================================================================================ */
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function busy(on) {
+  let b = $("#busy");
+  if (!b) { b = document.createElement("div"); b.id = "busy"; b.className = "busy"; b.textContent = "⏳ Server jaag raha hai (free server), 30–60 second lag sakte hain…"; document.body.appendChild(b); }
+  b.style.display = on ? "block" : "none";
+}
+async function request(path, body, token) {
+  const h = { "Content-Type": "application/json" };
+  if (token) h.Authorization = "Bearer " + token;
+  const wake = setTimeout(() => busy(true), 3000);
+  try {
+    let r;
+    try { r = await fetch(API_URL + path, { method: body ? "POST" : "GET", headers: h, body: body ? JSON.stringify(body) : undefined }); }
+    catch (e) { throw new Error("Server se connect nahi ho paya. Internet check karo ya thodi der baad try karo."); }
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { const er = new Error(d.error || "Error " + r.status); er.status = r.status; throw er; }
+    return d;
+  } finally { clearTimeout(wake); busy(false); }
+}
+
+const app = $("#app");
+let mode = "login", user = null, Q = [], mine = {}, shown = null, poll = null;
+const getTok = () => { try { return localStorage.getItem("cq_token"); } catch (e) { return null; } };
+const setTok = t => { try { t ? localStorage.setItem("cq_token", t) : localStorage.removeItem("cq_token"); } catch (e) {} };
+const api = (path, body) => request(path, body, getTok());
+const err = t => { const e = $("#err"); if (e) e.textContent = t; };
+
+async function init() {
+  if (getTok()) { try { user = await api("/api/me"); } catch (e) { if (e.status === 401) setTok(null); } }
+  render();
+}
+function render() { user ? home() : auth(); }
+
+/* ---------- login / signup ---------- */
+function auth() {
+  const su = mode === "signup";
+  app.innerHTML = `<div class="card"><h1>🎓 ${su ? "Sign up" : "Login"}</h1>
+  <div class="tabs"><button class="${su ? "g" : ""}" onclick="mode='login';render()">Login</button><button class="${su ? "" : "g"}" onclick="mode='signup';render()">Sign up</button></div>
+  ${su ? `<label class="l">Name</label><input type="text" id="n"><label class="l">Phone no.</label><input type="tel" id="p">` : ""}
+  <label class="l">Email</label><input type="email" id="e"><label class="l">Password</label><input type="password" id="pw">
+  <div class="msg" id="err"></div><button id="go" onclick="${su ? "signup()" : "login()"}">${su ? "Account banao" : "Login karo"}</button></div>`;
+}
+async function authCall(path, body) {
+  const b = $("#go"); b.disabled = true; err("");
+  try { const r = await api(path, body); setTok(r.token); user = r.user; render(); }
+  catch (e) { err(e.message); b.disabled = false; }
+}
+function signup() {
+  const body = { name: $("#n").value.trim(), phone: $("#p").value.trim(), email: $("#e").value.trim().toLowerCase(), password: $("#pw").value };
+  if (!body.name || !body.phone || !body.email || !body.password) return err("Saari details bharo.");
+  if (!/^\S+@\S+\.\S+$/.test(body.email)) return err("Email sahi nahi hai.");
+  if (!/^\d{10}$/.test(body.phone)) return err("Phone 10 digit ka hona chahiye.");
+  if (body.password.length < 4) return err("Password kam se kam 4 akshar ka rakho.");
+  authCall("/api/signup", body);
+}
+function login() {
+  authCall("/api/login", { email: $("#e").value.trim().toLowerCase(), password: $("#pw").value });
+}
+function logout() { setTok(null); user = null; mode = "login"; clearInterval(poll); render(); }
+
+/* ---------- questions ---------- */
+async function home() {
+  app.innerHTML = `<div class="top"><div><h1>Namaste, ${esc(user.name)} 👋</h1></div><button class="g" onclick="logout()">Logout</button></div>
+  <div id="qs"><div class="card mut">Loading…</div></div>`;
+  shown = null; mine = {};
+  await load();
+  clearInterval(poll); poll = setInterval(() => { if (!document.hidden) load(); }, 10000);
+}
+async function load() {
+  if (!user) return;
+  try {
+    const d = await api("/api/questions");
+    Q = d.questions; mine = d.mine;
+    const key = Q.map(q => q.id).join();
+    if (key !== shown) { shown = key; drawQs(); }
+  } catch (e) {
+    if (e.status === 401) return logout();
+    if (shown === null && $("#qs")) $("#qs").innerHTML = `<div class="card msg">${esc(e.message)}</div>`;
+  }
+}
+function drawQs() {
+  const box = $("#qs"); if (!box) return;
+  box.innerHTML = Q.length ? Q.map(card).join("") : `<div class="card mut">Abhi koi question nahi hai. Thodi der baad dekho, ye page khud update ho jata hai.</div>`;
+}
+function card(q) {
+  const v = mine[q.id], has = v !== undefined, multi = q.type === "multi";
+  const body = q.type === "text"
+    ? `<input type="text" id="t${q.id}" maxlength="300" placeholder="Apna jawab likho" value="${esc(has ? v : "")}">`
+    : q.opts.map((o, i) => `<label class="opt"><input type="${multi ? "checkbox" : "radio"}" name="q${q.id}" value="${i}" ${has && (multi ? [].concat(v).includes(i) : v === i) ? "checked" : ""}>${esc(o)}</label>`).join("");
+  return `<div class="card"><h2>${esc(q.text)}</h2>${multi ? `<div class="mut">Ek se zyada option chun sakte ho</div>` : ""}${body}
+  <button id="b${q.id}" onclick="submitAns('${q.id}')">${has ? "Update answer" : "Submit"}</button> <span class="msg ok" id="m${q.id}">${has ? "✔ Answer save ho chuka hai" : ""}</span></div>`;
+}
+async function submitAns(qid) {
+  const q = Q.find(x => x.id === qid), m = $("#m" + qid); m.className = "msg";
+  let v;
+  if (q.type === "text") { v = $("#t" + qid).value.trim(); if (!v) { m.textContent = "Pehle jawab likho."; return; } }
+  else {
+    const ch = [...document.querySelectorAll(`input[name="q${qid}"]:checked`)].map(x => +x.value);
+    if (!ch.length) { m.textContent = "Pehle option chuno."; return; }
+    v = q.type === "multi" ? ch : ch[0];
+  }
+  const wasDone = Q.length && Q.every(x => mine[x.id] !== undefined);
+  const btn = $("#b" + qid); btn.disabled = true; m.textContent = "Saving…";
+  try { await api("/api/answer", { qid, v }); }
+  catch (e) { btn.disabled = false; if (e.status === 401) return logout(); m.textContent = "Save nahi hua: " + e.message; return; }
+  btn.disabled = false; mine[qid] = v; m.className = "msg ok"; m.textContent = "✔ Answer save ho chuka hai"; btn.textContent = "Update answer";
+  if (!wasDone && Q.every(x => mine[x.id] !== undefined)) donePopup(); // sirf tab, jab last question complete ho
+}
+function donePopup() {
+  const d = document.createElement("div"); d.className = "ov";
+  d.innerHTML = `<div class="pop"><div class="em">🎉</div><h2>Survey complete!</h2>
+  <p class="mut">Aapne saare questions ke answers de diye hain. Dhanyavaad!</p><button id="ok">Theek hai</button></div>`;
+  d.addEventListener("click", e => { if (e.target === d || e.target.id === "ok") d.remove(); });
+  document.body.appendChild(d);
+}
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Admin Panel - Classroom Poll</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#f5f6fb;--card:#fff;--tx:#1b2232;--mut:#667085;--bd:#e2e5ee;--pri:#4f46e5;--ok:#16a34a;--c0:#4f46e5;--c1:#06b6d4;--c2:#f59e0b;--c3:#ef4444;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1219;--card:#181c27;--tx:#e8ebf3;--mut:#98a2b3;--bd:#2a3042;--pri:#818cf8;--c0:#818cf8;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0f1219;--card:#181c27;--tx:#e8ebf3;--mut:#98a2b3;--bd:#2a3042;--pri:#818cf8;--c0:#818cf8;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:920px;margin:0 auto;padding:16px}
+h1{font-size:1.4rem;margin:.2rem 0}h2{font-size:1.1rem;margin:0 0 .6rem}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:16px;margin:12px 0}
+.top{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.mut{color:var(--mut);font-size:.9rem}
+input,select{width:100%;padding:10px 12px;margin:5px 0 10px;border:1px solid var(--bd);border-radius:10px;background:var(--bg);color:var(--tx);font:inherit}
+.top select{width:auto;margin:0}
+label.l{font-size:.85rem;color:var(--mut)}
+button{background:var(--pri);color:#fff;border:0;border-radius:10px;padding:8px 14px;font:inherit;font-weight:600;cursor:pointer}
+button.g{background:transparent;color:var(--pri);border:1px solid var(--bd)}
+button.d{background:var(--c3)}
+.tabs{display:flex;gap:8px;margin:10px 0}.tabs button{flex:1;padding:10px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(max-width:560px){.grid{grid-template-columns:1fr}}
+.bar{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:.9rem}
+.bar .n{width:120px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar .t{flex:1;background:var(--bg);border-radius:8px;height:22px;overflow:hidden}
+.bar .f{height:100%;border-radius:8px;transition:width .5s}
+.pie{width:140px;height:140px;border-radius:50%;margin:auto;position:relative;transition:background .5s}
+.pie::after{content:attr(data-t);position:absolute;inset:28px;background:var(--card);border-radius:50%;display:grid;place-items:center;font-weight:700}
+.sc{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.85rem}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--bd);white-space:nowrap}
+td.w{white-space:normal;min-width:160px}
+.badge{font-size:.75rem;background:var(--bg);border:1px solid var(--bd);border-radius:20px;padding:1px 8px;color:var(--mut)}
+.msg{color:var(--c3);font-size:.9rem;min-height:1.2em}.msg.ok{color:var(--ok)}
+.busy{position:fixed;top:0;left:0;right:0;background:#f59e0b;color:#000;text-align:center;padding:8px;font-size:.9rem;z-index:20;display:none}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script>
+/* ======= CONFIG: deploy ke baad apne server ka address yahan daalo (end me "/" mat lagao) ======= */
+const API_URL = "http://localhost:3000";
+/* ============================================================================================ */
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function busy(on) {
+  let b = $("#busy");
+  if (!b) { b = document.createElement("div"); b.id = "busy"; b.className = "busy"; b.textContent = "⏳ Server jaag raha hai (free server), 30–60 second lag sakte hain…"; document.body.appendChild(b); }
+  b.style.display = on ? "block" : "none";
+}
+async function request(path, body, token) {
+  const h = { "Content-Type": "application/json" };
+  if (token) h.Authorization = "Bearer " + token;
+  const wake = setTimeout(() => busy(true), 3000);
+  try {
+    let r;
+    try { r = await fetch(API_URL + path, { method: body ? "POST" : "GET", headers: h, body: body ? JSON.stringify(body) : undefined }); }
+    catch (e) { throw new Error("Server se connect nahi ho paya. Internet check karo ya thodi der baad try karo."); }
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { const er = new Error(d.error || "Error " + r.status); er.status = r.status; throw er; }
+    return d;
+  } finally { clearTimeout(wake); busy(false); }
+}
+
+const COL = ["var(--c0)", "var(--c1)", "var(--c2)", "var(--c3)"];
+const TYPE = { mcq: "Single choice", multi: "Multiple choice", tf: "True/False", text: "Short text" };
+const app = $("#app");
+let tab = "res", U = [], Q = [], A = [], SL = [], poll = null;
+const getTok = () => { try { return sessionStorage.getItem("cq_atoken"); } catch (e) { return null; } };
+const setTok = t => { try { t ? sessionStorage.setItem("cq_atoken", t) : sessionStorage.removeItem("cq_atoken"); } catch (e) {} };
+const api = (path, body) => request(path, body, getTok());
+const msg = (id, t, ok) => { const e = $("#" + id); if (e) { e.textContent = t; e.className = "msg" + (ok ? " ok" : ""); } };
+
+function render() {
+  clearInterval(poll);
+  if (!getTok()) {
+    app.innerHTML = `<div class="card" style="max-width:420px;margin:40px auto"><h1>🛠️ Admin Login</h1><label class="l">Password</label><input id="ap" type="password">
+    <div class="msg" id="err"></div><button id="go" onclick="adminLogin()">Login</button></div>`;
+    $("#ap").addEventListener("keydown", e => { if (e.key === "Enter") adminLogin(); });
+    return;
+  }
+  app.innerHTML = `<div class="top"><h1>🛠️ Admin Panel</h1><button class="g" onclick="adminOut()">Logout</button></div>
+  <div class="msg" id="conn"></div>
+  <div class="tabs"><button data-t="res" onclick="showTab('res')">📊 Results</button><button data-t="stu" onclick="showTab('stu')">👥 Students</button><button data-t="set" onclick="showTab('set')">⚙️ Settings</button></div>
+  <div id="pane"></div>`;
+  showTab(tab);
+  loadData(); poll = setInterval(() => { if (!document.hidden) loadData(); }, 3000); // live update
+}
+async function adminLogin() {
+  const b = $("#go"); b.disabled = true; msg("err", "");
+  try { const r = await api("/api/admin/login", { password: $("#ap").value }); setTok(r.token); render(); }
+  catch (e) { msg("err", e.message); b.disabled = false; }
+}
+function adminOut() { setTok(null); render(); }
+async function loadData() {
+  try {
+    const d = await api("/api/admin/data");
+    U = d.users; Q = d.questions; A = d.answers; msg("conn", ""); refresh();
+  } catch (e) { if (e.status === 401) return adminOut(); msg("conn", e.message); }
+}
+
+/* ---------- tabs ---------- */
+function showTab(t) {
+  tab = t;
+  document.querySelectorAll(".tabs button").forEach(b => b.className = b.dataset.t === t ? "" : "g");
+  $("#pane").innerHTML = t === "res" ? `<div class="card"><h2>Naya question banao</h2>
+    <label class="l">Question type</label><select id="qty" onchange="typeChg()">
+    <option value="mcq">Single choice (4 options)</option><option value="multi">Multiple choice (ek se zyada)</option>
+    <option value="tf">True / False</option><option value="text">Short text answer</option></select>
+    <label class="l">Question</label><input id="qt">
+    <div id="ops" class="grid"><div><label class="l">Option A</label><input class="o"></div><div><label class="l">Option B</label><input class="o"></div>
+    <div><label class="l">Option C</label><input class="o"></div><div><label class="l">Option D</label><input class="o"></div></div>
+    <div class="msg" id="err"></div><button id="addb" onclick="addQ()">Question add karo</button></div><div id="res"></div>`
+    : t === "stu" ? `<div class="card sc" id="stu"></div>`
+    : `<div class="card"><h2>Admin password badlo</h2>
+    <label class="l">Purana password</label><input type="password" id="op"><label class="l">Naya password</label><input type="password" id="np">
+    <label class="l">Naya password dobara</label><input type="password" id="cp"><div class="msg" id="err2"></div><button onclick="chPw()">Password change karo</button></div>
+    <div class="card mut">Database: <b>MongoDB Atlas</b> (server: ${esc(API_URL)})</div>`;
+  refresh();
+}
+function typeChg() { $("#ops").style.display = ["tf", "text"].includes($("#qty").value) ? "none" : ""; }
+function refresh() { if (!$("#pane")) return; if (tab === "res") results(); else if (tab === "stu") students(); }
+
+/* ---------- questions ---------- */
+async function addQ() {
+  const type = $("#qty").value, text = $("#qt").value.trim();
+  let opts = [];
+  if (type !== "tf" && type !== "text") { opts = [...document.querySelectorAll(".o")].map(i => i.value.trim()); if (opts.some(o => !o)) return msg("err", "Chaaron options bharo."); }
+  if (!text) return msg("err", "Question likho.");
+  const b = $("#addb"); b.disabled = true;
+  try { await api("/api/admin/question", { type, text, opts }); await loadData(); showTab("res"); }
+  catch (e) { b.disabled = false; if (e.status === 401) return adminOut(); msg("err", e.message); }
+}
+async function delQ(id) {
+  if (!confirm("Ye question aur uske saare answers delete karein?")) return;
+  try { await api("/api/admin/question/delete", { id }); await loadData(); } catch (e) { alert(e.message); }
+}
+function results() {
+  const box = $("#res"); if (!box) return;
+  const um = {}; U.forEach(u => um[u.email] = u);
+  box.innerHTML = `<div class="card mut">👥 Students: <b>${U.length}</b> &nbsp;•&nbsp; ❓ Questions: <b>${Q.length}</b></div>` + Q.map(q => {
+    const ans = A.filter(a => a.qid === q.id), n = ans.length, isT = q.type === "text";
+    const lab = i => q.type === "tf" ? q.opts[i] : "ABCD"[i] + ". " + q.opts[i];
+    const rows = ans.map(a => {
+      const u = um[a.email] || { name: "?", phone: "" };
+      const t = isT ? String(a.v) : [].concat(a.v).map(i => lab(i) ?? "").join(", ");
+      return `<tr><td>${esc(u.name)}</td><td>${esc(a.email)}</td><td>${esc(u.phone)}</td><td class="${isT ? "w" : ""}">${esc(t)}</td></tr>`;
+    }).join("");
+    let chart = "";
+    if (!isT) {
+      const cnt = q.opts.map(() => 0);
+      ans.forEach(a => [].concat(a.v).forEach(i => { if (cnt[i] !== undefined) cnt[i]++; }));
+      const sum = cnt.reduce((x, y) => x + y, 0); let acc = 0;
+      const grad = sum ? cnt.map((c, i) => { const s = acc; acc += c / sum * 100; return `${COL[i]} ${s}% ${acc}%`; }).join(",") : "var(--bd) 0 100%";
+      chart = `<div class="grid"><div>${q.opts.map((o, i) => { const p = n ? Math.round(cnt[i] / n * 100) : 0;
+        return `<div class="bar"><span class="n">${esc(lab(i))}</span><div class="t"><div class="f" style="width:${p}%;background:${COL[i]}"></div></div><b>${cnt[i]} (${p}%)</b></div>`; }).join("")}</div>
+        <div><div class="pie" style="background:conic-gradient(${grad})" data-t="${n}"></div></div></div>`;
+    }
+    return `<div class="card"><div class="top"><h2>${esc(q.text)} <span class="badge">${TYPE[q.type] || "Single choice"}</span></h2><button class="d" onclick="delQ('${q.id}')">Delete</button></div>
+    ${chart}<h2 style="margin-top:14px">Kisne kya jawab diya (${n})</h2>
+    <div class="sc">${n ? `<table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Answer</th></tr>${rows}</table>` : `<span class="mut">Abhi tak kisi ne answer nahi diya.</span>`}</div></div>`;
+  }).join("");
+}
+
+/* ---------- students ---------- */
+function students() {
+  const box = $("#stu"); if (!box) return;
+  SL = U.slice().sort((a, b) => String(a.name).localeCompare(b.name));
+  box.innerHTML = SL.length ? `<table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Answers</th><th></th></tr>` + SL.map((u, i) => {
+    const done = A.filter(a => a.email === u.email && Q.some(q => q.id === a.qid)).length;
+    return `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.phone)}</td><td>${done}/${Q.length}</td>
+    <td><button class="g" onclick="resetPw(${i})">Reset password</button> <button class="d" onclick="delStu(${i})">Delete</button></td></tr>`;
+  }).join("") + "</table>" : `<span class="mut">Abhi koi student registered nahi hai.</span>`;
+}
+async function resetPw(i) {
+  const u = SL[i]; if (!u) return;
+  const p = prompt("Naya password for " + u.name + " (kam se kam 4 akshar):");
+  if (!p) return; if (p.length < 4) return alert("Password bahut chhota hai.");
+  try { await api("/api/admin/user/reset", { email: u.email, password: p }); alert("Password badal gaya."); } catch (e) { alert(e.message); }
+}
+async function delStu(i) {
+  const u = SL[i]; if (!u || !confirm(u.name + " ko aur uske saare answers ko delete karein?")) return;
+  try { await api("/api/admin/user/delete", { email: u.email }); await loadData(); } catch (e) { alert(e.message); }
+}
+
+/* ---------- settings ---------- */
+async function chPw() {
+  const o = $("#op").value, n = $("#np").value, c = $("#cp").value;
+  if (n.length < 4) return msg("err2", "Naya password kam se kam 4 akshar ka ho.");
+  if (n !== c) return msg("err2", "Dono naye password match nahi karte.");
+  try {
+    await api("/api/admin/password", { oldPassword: o, newPassword: n });
+    ["op", "np", "cp"].forEach(i => $("#" + i).value = "");
+    msg("err2", "✔ Password badal gaya.", true);
+  } catch (e) { msg("err2", e.message); }
+}
+render();
+</script>
+</body>
+</html>
