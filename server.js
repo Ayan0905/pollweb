@@ -24,6 +24,7 @@ const bad = (res, msg, code = 400) => res.status(code).json({ error: msg });
 const wrap = fn => (req, res) => fn(req, res).catch(e => { console.error(e); bad(res, "Server me gadbad hui. Thodi der baad try karo.", 500); });
 const str = (v, max) => String(v ?? "").trim().slice(0, max);
 const sign = (payload, exp) => jwt.sign(payload, JWT_SECRET, { expiresIn: exp });
+const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: true, legacyHeaders: false,
@@ -43,7 +44,7 @@ function need(role) {
 app.get("/", (req, res) => res.json({ ok: true, service: "classroom-poll" }));
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
-/* ---------------- student ---------------- */
+/* ---------------- student: login / signup ---------------- */
 app.post("/api/signup", authLimiter, wrap(async (req, res) => {
   const name = str(req.body.name, 60), email = str(req.body.email, 120).toLowerCase(), phone = str(req.body.phone, 10);
   const password = String(req.body.password || "");
@@ -73,16 +74,43 @@ app.get("/api/me", need("student"), wrap(async (req, res) => {
   res.json({ name: u.name, email: u._id });
 }));
 
-app.get("/api/questions", need("student"), wrap(async (req, res) => {
-  const qs = await col("questions").find({}).sort({ t: 1 }).toArray();
+/* ---------------- student: surveys ---------------- */
+// Saare surveys ki list + is student ki progress
+app.get("/api/surveys", need("student"), wrap(async (req, res) => {
+  const [surveys, qs, mine] = await Promise.all([
+    col("surveys").find({}).sort({ t: 1 }).toArray(),
+    col("questions").find({}).toArray(),
+    col("answers").find({ email: req.auth.email }).toArray()
+  ]);
+  const answered = new Set(mine.map(a => a.qid));
+  const list = surveys.map(s => {
+    const mq = qs.filter(q => q.sid === s._id);
+    return { id: s._id, title: s.title, description: s.description || "", status: s.status, total: mq.length, done: mq.filter(q => answered.has(q._id)).length };
+  }).filter(s => s.total > 0); // bina question wala survey students ko nahi dikhta
+  res.json({ surveys: list });
+}));
+
+// Ek survey ke questions + is student ke answers
+app.get("/api/survey", need("student"), wrap(async (req, res) => {
+  const s = await col("surveys").findOne({ _id: str(req.query.id, 50) });
+  if (!s) return bad(res, "Ye survey nahi mila.", 404);
+  if (s.status !== "open") return bad(res, "Ye survey band ho chuka hai.", 403);
+  const qs = await col("questions").find({ sid: s._id }).sort({ t: 1 }).toArray();
+  const ids = new Set(qs.map(q => q._id));
   const mine = {};
-  (await col("answers").find({ email: req.auth.email }).toArray()).forEach(a => { mine[a.qid] = a.v; });
-  res.json({ questions: qs.map(q => ({ id: q._id, text: q.text, type: q.type, opts: q.opts })), mine });
+  (await col("answers").find({ email: req.auth.email }).toArray()).forEach(a => { if (ids.has(a.qid)) mine[a.qid] = a.v; });
+  res.json({
+    survey: { id: s._id, title: s.title, description: s.description || "" },
+    questions: qs.map(q => ({ id: q._id, text: q.text, type: q.type, opts: q.opts })),
+    mine
+  });
 }));
 
 app.post("/api/answer", need("student"), wrap(async (req, res) => {
   const q = await col("questions").findOne({ _id: str(req.body.qid, 50) });
   if (!q) return bad(res, "Ye question ab available nahi hai.", 404);
+  const s = await col("surveys").findOne({ _id: q.sid });
+  if (!s || s.status !== "open") return bad(res, "Ye survey band ho chuka hai.", 403);
   const raw = req.body.v;
   const okIdx = i => Number.isInteger(i) && i >= 0 && i < q.opts.length;
   let v;
@@ -108,20 +136,54 @@ app.post("/api/admin/login", authLimiter, wrap(async (req, res) => {
 }));
 
 app.get("/api/admin/data", need("admin"), wrap(async (req, res) => {
-  const [users, questions, answers] = await Promise.all([
+  const [users, surveys, questions, answers] = await Promise.all([
     col("users").find({}).sort({ t: 1 }).toArray(),
+    col("surveys").find({}).sort({ t: 1 }).toArray(),
     col("questions").find({}).sort({ t: 1 }).toArray(),
     col("answers").find({}).toArray()
   ]);
   res.json({
     users: users.map(u => ({ email: u._id, name: u.name, phone: u.phone })),
-    questions: questions.map(q => ({ id: q._id, text: q.text, type: q.type, opts: q.opts })),
+    surveys: surveys.map(s => ({ id: s._id, title: s.title, description: s.description || "", status: s.status })),
+    questions: questions.map(q => ({ id: q._id, sid: q.sid, text: q.text, type: q.type, opts: q.opts })),
     answers: answers.map(a => ({ qid: a.qid, email: a.email, v: a.v }))
   });
 }));
 
+app.post("/api/admin/survey", need("admin"), wrap(async (req, res) => {
+  const title = str(req.body.title, 100), description = str(req.body.description, 300);
+  if (!title) return bad(res, "Survey ka naam likho.");
+  const id = newId();
+  await col("surveys").insertOne({ _id: id, title, description, status: "open", t: Date.now() });
+  res.json({ id });
+}));
+
+app.post("/api/admin/survey/update", need("admin"), wrap(async (req, res) => {
+  const set = {};
+  if (req.body.title !== undefined) { set.title = str(req.body.title, 100); if (!set.title) return bad(res, "Survey ka naam khaali nahi ho sakta."); }
+  if (req.body.description !== undefined) set.description = str(req.body.description, 300);
+  if (req.body.status !== undefined) {
+    if (!["open", "closed"].includes(req.body.status)) return bad(res, "Status galat hai.");
+    set.status = req.body.status;
+  }
+  if (!Object.keys(set).length) return bad(res, "Kuch badalne ko nahi diya.");
+  const r = await col("surveys").updateOne({ _id: str(req.body.id, 50) }, { $set: set });
+  if (!r.matchedCount) return bad(res, "Survey nahi mila.", 404);
+  res.json({ ok: true });
+}));
+
+app.post("/api/admin/survey/delete", need("admin"), wrap(async (req, res) => {
+  const id = str(req.body.id, 50);
+  const qs = await col("questions").find({ sid: id }).toArray();
+  for (const q of qs) await col("answers").deleteMany({ qid: q._id });
+  await col("questions").deleteMany({ sid: id });
+  await col("surveys").deleteOne({ _id: id });
+  res.json({ ok: true });
+}));
+
 app.post("/api/admin/question", need("admin"), wrap(async (req, res) => {
-  const type = str(req.body.type, 10), text = str(req.body.text, 200);
+  const sid = str(req.body.sid, 50), type = str(req.body.type, 10), text = str(req.body.text, 200);
+  if (!(await col("surveys").findOne({ _id: sid }))) return bad(res, "Pehle survey chuno.", 404);
   if (!["mcq", "multi", "tf", "text"].includes(type)) return bad(res, "Question type galat hai.");
   if (!text) return bad(res, "Question likho.");
   let opts = [];
@@ -130,8 +192,8 @@ app.post("/api/admin/question", need("admin"), wrap(async (req, res) => {
     opts = (Array.isArray(req.body.opts) ? req.body.opts : []).map(o => str(o, 100));
     if (opts.length !== 4 || opts.some(o => !o)) return bad(res, "Chaaron options bharo.");
   }
-  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  await col("questions").insertOne({ _id: id, text, type, opts, t: Date.now() });
+  const id = newId();
+  await col("questions").insertOne({ _id: id, sid, text, type, opts, t: Date.now() });
   res.json({ id });
 }));
 
@@ -165,9 +227,23 @@ app.post("/api/admin/password", need("admin"), wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+/* Purane questions (bina survey ke) ko ek "General Survey" me daal deta hai, taaki purana data na khoye */
+async function migrate() {
+  const orphans = (await col("questions").find({}).toArray()).filter(q => !q.sid);
+  if (!orphans.length) return;
+  let s = (await col("surveys").find({}).sort({ t: 1 }).toArray())[0];
+  if (!s) {
+    s = { _id: newId(), title: "General Survey", description: "", status: "open", t: Date.now() };
+    await col("surveys").insertOne(s);
+  }
+  for (const q of orphans) await col("questions").updateOne({ _id: q._id }, { $set: { sid: s._id } });
+  console.log(orphans.length + " purane question(s) ko survey '" + s.title + "' me daal diya.");
+}
+
 MongoClient.connect(MONGODB_URI)
-  .then(client => {
+  .then(async client => {
     db = client.db(DB_NAME);
+    await migrate();
     app.listen(PORT, () => console.log("Server chal raha hai, port " + PORT));
   })
-  .catch(e => { console.error("MongoDB se connect nahi hua:", e.message); process.exit(1); });
+  .catch(e => { console.error("Startup me error (MongoDB connect ya migrate):", e.message); process.exit(1); });
