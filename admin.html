@@ -68,7 +68,7 @@ async function request(path, body, token) {
 const COL = ["var(--c0)", "var(--c1)", "var(--c2)", "var(--c3)"];
 const TYPE = { mcq: "Single choice", multi: "Multiple choice", tf: "True/False", text: "Short text" };
 const app = $("#app");
-let tab = "res", U = [], Q = [], A = [], SL = [], poll = null;
+let tab = "sv", U = [], S = [], Q = [], A = [], SL = [], sel = null, poll = null;
 const getTok = () => { try { return sessionStorage.getItem("cq_atoken"); } catch (e) { return null; } };
 const setTok = t => { try { t ? sessionStorage.setItem("cq_atoken", t) : sessionStorage.removeItem("cq_atoken"); } catch (e) {} };
 const api = (path, body) => request(path, body, getTok());
@@ -84,7 +84,7 @@ function render() {
   }
   app.innerHTML = `<div class="top"><h1>🛠️ Admin Panel</h1><button class="g" onclick="adminOut()">Logout</button></div>
   <div class="msg" id="conn"></div>
-  <div class="tabs"><button data-t="res" onclick="showTab('res')">📊 Results</button><button data-t="stu" onclick="showTab('stu')">👥 Students</button><button data-t="set" onclick="showTab('set')">⚙️ Settings</button></div>
+  <div class="tabs"><button data-t="sv" onclick="showTab('sv')">📋 Surveys</button><button data-t="res" onclick="showTab('res')">📊 Results</button><button data-t="stu" onclick="showTab('stu')">👥 Students</button><button data-t="set" onclick="showTab('set')">⚙️ Settings</button></div>
   <div id="pane"></div>`;
   showTab(tab);
   loadData(); poll = setInterval(() => { if (!document.hidden) loadData(); }, 3000); // live update
@@ -98,7 +98,9 @@ function adminOut() { setTok(null); render(); }
 async function loadData() {
   try {
     const d = await api("/api/admin/data");
-    U = d.users; Q = d.questions; A = d.answers; msg("conn", ""); refresh();
+    U = d.users; S = d.surveys; Q = d.questions; A = d.answers; msg("conn", "");
+    if (!S.some(s => s.id === sel)) sel = S.length ? S[0].id : null;
+    refresh();
   } catch (e) { if (e.status === 401) return adminOut(); msg("conn", e.message); }
 }
 
@@ -106,7 +108,13 @@ async function loadData() {
 function showTab(t) {
   tab = t;
   document.querySelectorAll(".tabs button").forEach(b => b.className = b.dataset.t === t ? "" : "g");
-  $("#pane").innerHTML = t === "res" ? `<div class="card"><h2>Naya question banao</h2>
+  $("#pane").innerHTML = t === "sv" ? `<div class="card"><h2>Naya survey banao</h2>
+    <label class="l">Survey ka naam</label><input id="st" maxlength="100" placeholder="jaise: Chapter 3 Quiz">
+    <label class="l">Chhota description (optional)</label><input id="sd" maxlength="300" placeholder="students ko dikhega">
+    <div class="msg" id="err"></div><button id="adds" onclick="addSurvey()">Survey banao</button></div><div id="svl"></div>`
+    : t === "res" ? `<div class="card top"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span>Survey:</span><select id="selsv" onchange="sel=this.value;refresh()"></select></div>
+    <button class="g" onclick="copyLink(sel)">🔗 Student link copy</button></div>
+    <div class="card"><h2>Is survey me naya question</h2>
     <label class="l">Question type</label><select id="qty" onchange="typeChg()">
     <option value="mcq">Single choice (4 options)</option><option value="multi">Multiple choice (ek se zyada)</option>
     <option value="tf">True / False</option><option value="text">Short text answer</option></select>
@@ -122,16 +130,71 @@ function showTab(t) {
   refresh();
 }
 function typeChg() { $("#ops").style.display = ["tf", "text"].includes($("#qty").value) ? "none" : ""; }
-function refresh() { if (!$("#pane")) return; if (tab === "res") results(); else if (tab === "stu") students(); }
+function fillSel() {
+  const s = $("#selsv"); if (!s) return;
+  const sig = S.map(x => x.id + x.title + x.status).join("|");
+  if (s.dataset.sig !== sig) {
+    s.innerHTML = S.length ? S.map(x => `<option value="${x.id}">${esc(x.title)}${x.status === "open" ? "" : " (band)"}</option>`).join("") : `<option value="">— koi survey nahi —</option>`;
+    s.dataset.sig = sig;
+  }
+  s.value = sel || "";
+}
+function refresh() {
+  if (!$("#pane")) return;
+  fillSel();
+  if (tab === "sv") surveys(); else if (tab === "res") results(); else if (tab === "stu") students();
+}
 
-/* ---------- questions ---------- */
+/* ---------- surveys ---------- */
+async function addSurvey() {
+  const title = $("#st").value.trim(), description = $("#sd").value.trim();
+  if (!title) return msg("err", "Survey ka naam likho.");
+  const b = $("#adds"); b.disabled = true;
+  try { const r = await api("/api/admin/survey", { title, description }); sel = r.id; await loadData(); showTab("res"); }
+  catch (e) { b.disabled = false; if (e.status === 401) return adminOut(); msg("err", e.message); }
+}
+function surveys() {
+  const box = $("#svl"); if (!box) return;
+  box.innerHTML = S.length ? S.map(s => {
+    const qs = Q.filter(q => q.sid === s.id), ids = new Set(qs.map(q => q.id)), per = {};
+    A.forEach(a => { if (ids.has(a.qid)) per[a.email] = (per[a.email] || 0) + 1; });
+    const started = Object.keys(per).length, done = qs.length ? Object.values(per).filter(n => n >= qs.length).length : 0, open = s.status === "open";
+    return `<div class="card"><div class="top"><h2>${esc(s.title)} <span class="badge ${open ? "badge-green" : "badge-red"}">${open ? "Open" : "Band"}</span></h2></div>
+    ${s.description ? `<p class="mut" style="margin:0 0 .5rem">${esc(s.description)}</p>` : ""}
+    <div class="mut">❓ ${qs.length} questions &nbsp;•&nbsp; 👥 ${started} ne shuru kiya &nbsp;•&nbsp; ✅ ${done} ne complete kiya</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:.7rem">
+      <button onclick="openRes('${s.id}')">📊 Questions / Results</button>
+      <button class="g" onclick="copyLink('${s.id}')">🔗 Link copy</button>
+      <button class="g" onclick="toggleSv('${s.id}')">${open ? "⏸ Band karo" : "▶ Dobara kholo"}</button>
+      <button class="d" onclick="delSv('${s.id}')">Delete</button></div></div>`;
+  }).join("") : `<div class="card mut">Abhi koi survey nahi hai. Upar se pehla survey banao.</div>`;
+}
+function openRes(id) { sel = id; showTab("res"); }
+async function toggleSv(id) {
+  const s = S.find(x => x.id === id); if (!s) return;
+  try { await api("/api/admin/survey/update", { id, status: s.status === "open" ? "closed" : "open" }); await loadData(); } catch (e) { alert(e.message); }
+}
+async function delSv(id) {
+  const s = S.find(x => x.id === id); if (!s) return;
+  if (!confirm('Survey "' + s.title + '", uske saare questions aur students ke answers delete ho jayenge. Pakka?')) return;
+  try { await api("/api/admin/survey/delete", { id }); if (sel === id) sel = null; await loadData(); } catch (e) { alert(e.message); }
+}
+function copyLink(id) {
+  if (!id) return alert("Pehle survey banao.");
+  const link = location.href.split(/[?#]/)[0].replace(/[^/]*$/, "") + "student.html?s=" + id;
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(() => alert("Link copy ho gaya:\n" + link), () => prompt("Is link ko copy karo:", link));
+  else prompt("Is link ko copy karo:", link);
+}
+
+/* ---------- questions + results ---------- */
 async function addQ() {
+  if (!sel) return msg("err", "Pehle Surveys tab me survey banao.");
   const type = $("#qty").value, text = $("#qt").value.trim();
   let opts = [];
   if (type !== "tf" && type !== "text") { opts = [...document.querySelectorAll(".o")].map(i => i.value.trim()); if (opts.some(o => !o)) return msg("err", "Chaaron options bharo."); }
   if (!text) return msg("err", "Question likho.");
   const b = $("#addb"); b.disabled = true;
-  try { await api("/api/admin/question", { type, text, opts }); await loadData(); showTab("res"); }
+  try { await api("/api/admin/question", { sid: sel, type, text, opts }); await loadData(); showTab("res"); }
   catch (e) { b.disabled = false; if (e.status === 401) return adminOut(); msg("err", e.message); }
 }
 async function delQ(id) {
@@ -140,8 +203,14 @@ async function delQ(id) {
 }
 function results() {
   const box = $("#res"); if (!box) return;
+  const s = S.find(x => x.id === sel);
+  if (!s) { box.innerHTML = `<div class="card mut">Koi survey nahi hai. Pehle Surveys tab me naya survey banao.</div>`; return; }
   const um = {}; U.forEach(u => um[u.email] = u);
-  box.innerHTML = `<div class="card mut">👥 Students: <b>${U.length}</b> &nbsp;•&nbsp; ❓ Questions: <b>${Q.length}</b></div>` + Q.map(q => {
+  const qs = Q.filter(q => q.sid === sel), ids = new Set(qs.map(q => q.id)), per = {};
+  A.forEach(a => { if (ids.has(a.qid)) per[a.email] = (per[a.email] || 0) + 1; });
+  const started = Object.keys(per).length, done = qs.length ? Object.values(per).filter(n => n >= qs.length).length : 0;
+  box.innerHTML = `<div class="card mut">📋 <b>${esc(s.title)}</b> ${s.status === "open" ? "" : "(band)"} &nbsp;•&nbsp; ❓ Questions: <b>${qs.length}</b> &nbsp;•&nbsp; 👥 Shuru kiya: <b>${started}</b> &nbsp;•&nbsp; ✅ Complete: <b>${done}</b></div>` +
+  (qs.length ? qs.map(q => {
     const ans = A.filter(a => a.qid === q.id), n = ans.length, isT = q.type === "text";
     const lab = i => q.type === "tf" ? q.opts[i] : "ABCD"[i] + ". " + q.opts[i];
     const rows = ans.map(a => {
@@ -154,7 +223,7 @@ function results() {
       const cnt = q.opts.map(() => 0);
       ans.forEach(a => [].concat(a.v).forEach(i => { if (cnt[i] !== undefined) cnt[i]++; }));
       const sum = cnt.reduce((x, y) => x + y, 0); let acc = 0;
-      const grad = sum ? cnt.map((c, i) => { const s = acc; acc += c / sum * 100; return `${COL[i]} ${s}% ${acc}%`; }).join(",") : "var(--bd) 0 100%";
+      const grad = sum ? cnt.map((c, i) => { const st = acc; acc += c / sum * 100; return `${COL[i]} ${st}% ${acc}%`; }).join(",") : "var(--bd) 0 100%";
       chart = `<div class="grid"><div>${q.opts.map((o, i) => { const p = n ? Math.round(cnt[i] / n * 100) : 0;
         return `<div class="bar"><span class="n">${esc(lab(i))}</span><div class="t"><div class="f" style="width:${p}%;background:${COL[i]}"></div></div><b>${cnt[i]} (${p}%)</b></div>`; }).join("")}</div>
         <div><div class="pie" style="background:conic-gradient(${grad})" data-t="${n}"></div></div></div>`;
@@ -162,16 +231,18 @@ function results() {
     return `<div class="card"><div class="top"><h2>${esc(q.text)} <span class="badge">${TYPE[q.type] || "Single choice"}</span></h2><button class="d" onclick="delQ('${q.id}')">Delete</button></div>
     ${chart}<h2 style="margin-top:14px">Kisne kya jawab diya (${n})</h2>
     <div class="sc">${n ? `<table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Answer</th></tr>${rows}</table>` : `<span class="mut">Abhi tak kisi ne answer nahi diya.</span>`}</div></div>`;
-  }).join("");
+  }).join("") : `<div class="card mut">Is survey me abhi koi question nahi. Upar se question add karo.</div>`);
 }
 
 /* ---------- students ---------- */
 function students() {
   const box = $("#stu"); if (!box) return;
   SL = U.slice().sort((a, b) => String(a.name).localeCompare(b.name));
-  box.innerHTML = SL.length ? `<table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Answers</th><th></th></tr>` + SL.map((u, i) => {
-    const done = A.filter(a => a.email === u.email && Q.some(q => q.id === a.qid)).length;
-    return `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.phone)}</td><td>${done}/${Q.length}</td>
+  const svs = S.map(s => Q.filter(q => q.sid === s.id).map(q => q.id)).filter(ids => ids.length);
+  const by = {}; A.forEach(a => (by[a.email] = by[a.email] || new Set()).add(a.qid));
+  box.innerHTML = SL.length ? `<table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Surveys complete</th><th></th></tr>` + SL.map((u, i) => {
+    const m = by[u.email] || new Set(), done = svs.filter(ids => ids.every(id => m.has(id))).length;
+    return `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.phone)}</td><td>${done}/${svs.length}</td>
     <td><button class="g" onclick="resetPw(${i})">Reset password</button> <button class="d" onclick="delStu(${i})">Delete</button></td></tr>`;
   }).join("") + "</table>" : `<span class="mut">Abhi koi student registered nahi hai.</span>`;
 }
